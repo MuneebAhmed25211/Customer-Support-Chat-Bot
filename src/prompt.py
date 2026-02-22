@@ -1,11 +1,12 @@
-from langchain_core.prompts import PromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
+memory_prompt = ChatPromptTemplate.from_messages([
+    ("system", """You are a helpful customer support assistant.
+Use the following context to answer the question.
+Answer only from the context provided.
+If you don't know, say you don't know.
 
-prompt = PromptTemplate(template="""
-
-Context: {context}
-
-Question: {question}
-
-Answer only from context:""",
-input_variables=["context","question"])
+Context: {context}"""),
+    MessagesPlaceholder(variable_name="chat_history"),
+    ("human", "{question}")
+])

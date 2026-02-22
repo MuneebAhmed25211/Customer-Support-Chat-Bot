@@ -3,13 +3,13 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
 from langchain_pinecone import PineconeVectorStore
-from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_groq import ChatGroq
 from pinecone import Pinecone
 from src.helper import Embeddings
-from src.prompt import prompt
-
+from src.prompt import memory_prompt
 load_dotenv()
 
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
@@ -30,23 +30,20 @@ llm = ChatGroq(
     temperature=0
 )
 
-rag_chain = (
-    {
-        "context": vectorstore.as_retriever(search_kwargs={"k": 2})
-                   | (lambda docs: "\n\n".join([d.page_content for d in docs])),
-        "question": RunnablePassthrough()
-    }
-    | prompt | llm | StrOutputParser()
-)
 
-# ── FastAPI ────────────────────────────────
+
+# Store chat history per session
+chat_histories = {}
+
 app = FastAPI()
 
 class QuestionRequest(BaseModel):
     question: str
+    session_id: str = "default"
 
 class AnswerResponse(BaseModel):
     answer: str
+    session_id: str
 
 @app.get("/")
 def home():
@@ -54,5 +51,41 @@ def home():
 
 @app.post("/chat")
 def chat(request: QuestionRequest):
-    answer = rag_chain.invoke(request.question)
-    return AnswerResponse(answer=answer)
+    session_id = request.session_id
+
+    # Get or create history for this session
+    if session_id not in chat_histories:
+        chat_histories[session_id] = []
+
+    history = chat_histories[session_id]
+
+    # Retrieve context from vector DB
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 2})
+    docs = retriever.invoke(request.question)
+    context = "\n\n".join([d.page_content for d in docs])
+
+    # Build chain with memory
+    chain = memory_prompt | llm | StrOutputParser()
+
+    # Invoke with history
+    answer = chain.invoke({
+        "context": context,
+        "chat_history": history,
+        "question": request.question
+    })
+
+    # Update history
+    history.append(HumanMessage(content=request.question))
+    history.append(AIMessage(content=answer))
+
+    # Keep last 10 messages only to avoid token overflow
+    if len(history) > 10:
+        chat_histories[session_id] = history[-10:]
+
+    return AnswerResponse(answer=answer, session_id=session_id)
+
+@app.delete("/chat/{session_id}")
+def clear_history(session_id: str):
+    if session_id in chat_histories:
+        del chat_histories[session_id]
+    return {"status": "History cleared", "session_id": session_id}
